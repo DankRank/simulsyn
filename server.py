@@ -21,8 +21,16 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
                 del ls[i]
                 break
         self.request.sendall(bytes([len(ls)]) + b''.join(x[0] for x in ls))
-with socketserver.TCPServer(('', 8086), MyTCPHandler, bind_and_activate=False) as server:
-    server.allow_reuse_address = True
-    server.server_bind()
-    server.server_activate()
-    server.serve_forever()
+def parseip(s):
+    ip, port = s.rsplit(':', 1)
+    return ip, int(port)
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--bind', default=('', 8086), type=parseip)
+    args = parser.parse_args()
+    with socketserver.TCPServer(args.bind, MyTCPHandler, bind_and_activate=False) as server:
+        server.allow_reuse_address = True
+        server.server_bind()
+        server.server_activate()
+        server.serve_forever()

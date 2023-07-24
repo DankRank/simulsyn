@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-RETRIES = 50
-MASTERSERVER = ('localhost', 8086)
 import tkinter
 import socket
 import threading
@@ -24,7 +22,19 @@ def getpeerlist(laddr, raddr):
         data = recvall(s, n*6)
         s.shutdown(socket.SHUT_RDWR)
         return [(socket.inet_ntop(socket.AF_INET, data[i*6:i*6+4]), data[i*6+4]<<8 | data[i*6+5]) for i in range(n)]
-def ui_peerlist(laddr, raddr):
+def doconnect(laddr, raddr, retries):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(laddr)
+    for i in range(retries):
+        try:
+            s.connect(raddr)
+            return s
+        except:
+            traceback.print_exc()
+    s.close()
+    return None
+def ui_peerlist(laddr, raddr, retries):
     s = None
     ls = []
     root = tkinter.Tk()
@@ -46,18 +56,9 @@ def ui_peerlist(laddr, raddr):
         sel = lsbox.curselection()
         if len(sel) != 1:
             return
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(laddr)
-        for i in range(RETRIES):
-            try:
-                s.connect(ls[sel[0]])
-                root.destroy()
-                return
-            except:
-                traceback.print_exc()
-        s.close()
-        s = None
+        s = doconnect(laddr, ls[sel[0]], retries)
+        if s is not None:
+            root.destroy()
     lsbox.bind('<Double-Button>', connect)
     lsbox.bind('<Return>', connect)
     lsbox.bind('<F5>', refresh)
@@ -110,5 +111,21 @@ def ui_chat(s):
     finally:
         if thread:
             thread.join(.1)
+def parseip(s):
+    ip, port = s.rsplit(':', 1)
+    return ip, int(port)
 if __name__ == '__main__':
-    ui_chat(ui_peerlist(('', genport()), MASTERSERVER))
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--retries', default=50, type=int)
+    parser.add_argument('--local', type=parseip)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--remote', type=parseip)
+    group.add_argument('--master', type=parseip)
+    args = parser.parse_args()
+    if args.local is None:
+        args.local = ('', genport())
+    if args.remote is None:
+        ui_chat(ui_peerlist(args.local, args.master, args.retries))
+    else:
+        ui_chat(doconnect(args.local, args.remote, args.retries))
