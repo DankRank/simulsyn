@@ -1,0 +1,135 @@
+simulsyn - TCP simultaneous open example
+
+This is a simple chat application using TCP simultaneous open to create a
+direct connection between peers behind NAT.
+
+Traditionally TCP uses the so-called three-way handshake to establish a
+connection:
+   CLOSED                CLOSED
+     |            (listen) |
+   CLOSED                LISTEN
+     | (connect)           |
+  SYN-SENT               LISTEN
+     | --------SYN-------> |
+  SYN-SENT            SYN-RECEIVED
+     | <-----SYN+ACK------ |
+ESTABLISHED           SYN-RECEIVED
+     | --------ACK-------> |
+ESTABLISHED           ESTABLISHED
+
+However, the TCP standard also defines an alternative way to connect called
+simultaneous open. If a socket in the SYN-SENT state receieves a SYN, it
+replies with SYN+ACK and goes to the SYN-RECEIVED state and proceeds from
+there. Effectively, a connection can be established by having two hosts connect
+to each other:
+   CLOSED                CLOSED
+     | (connect)           |
+     |           (connect) |
+  SYN-SENT              SYN-SENT
+     | --------SYN-------> |
+     | <-------SYN-------- |
+SYN-RECEIVED          SYN-RECEIVED
+     | ------SYN+ACK-----> |
+     | <-----SYN+ACK------ |
+ESTABLISHED           ESTABLISHED
+
+To actually perform this trick, both hosts need to bind their socket to a known
+port number, so that the other host knows where to connect to.  Secondly, the
+SYNs must be sent at approximately the same time. Ideally, they should cross
+each other on the internet. If one of the hosts sends the SYN too early, the
+other one will most likely reject it with RST, and the connection will fail.
+However if the first SYN is dropped instead, the connection will be established
+via a mix of a simultaneous open and a three-way handshake:
+          (SYN rejected)                    (SYN dropped)
+   CLOSED                CLOSED      CLOSED                CLOSED
+     | (connect)           |           | (connect)           |
+  SYN-SENT               CLOSED     SYN-SENT               CLOSED
+     | --------SYN-------> |           | ----SYN-> (dropped) |
+  SYN-SENT               CLOSED     SYN-SENT               CLOSED
+     | <-------RST-------- |           |           (connect) |
+   CLOSED                CLOSED     SYN-SENT              SYN-SENT
+     |           (connect) |           | <-------SYN-------- |
+   CLOSED               SYN-SENT  SYN-RECEIVED            SYN-SENT
+     | <-------SYN-------- |           | ------SYN+ACK-----> |
+   CLOSED               SYN-SENT  SYN-RECEIVED          ESTABLISHED
+     | --------RST-------> |           | <-------ACK-------- |
+   CLOSED                CLOSED   ESTABLISHED           ESTABLISHED
+
+The fact that SYN packets must either cross each other or get dropped in the
+CLOSED state makes this a pretty contrived scenario. The TCP standard lists a
+couple of ways to go from LISTEN to SYN-SENT, but this is hard to achieve with
+the usual Berkeley sockets API. There is one application where simultaneous
+open is a practical technique: NAT hole punching. A very common NAT setup is
+something like this:
+
+-A FORWARD -o eth0 -j ACCEPT
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-P FORWARD DROP
+-t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+Such setup has three properties that allow simultaneous opens to go smoothly.
+
+1) Incoming SYNs which come as a reply must not be allowed to pass through. If
+the firewall simply drops all incoming SYN packets to prevent new inbound
+connections, simultaneous open will obviously not work.
+
+2) Incoming SYNs which initiate a connection should be dropped without any
+response (i.e. don't reply with RST or ICMP error). As illustrated above,
+dropping the SYN, instead of rejecting it, removes the requirement for packets
+to cross each other on the net.
+
+Note that conntrack's NEW/ESTABLISHED states are ideal for telling apart the
+"first" SYN from the "reply" SYN. Once a NEW packet is successfully routed, any
+packets going in the opposite direction are considered to be ESTABLISHED.
+
+3) NAT must reuse source port mappings between different connections. To be
+precise, there needs to be a way to know what public ip:port endpoint each host
+should connect to. If the NAT gives you a randomized port for every connection,
+there's not much you can do. If it allocates ports sequentially, you can try to
+predict the next port you'll get, but the ideal situation is when you can reuse
+a single port multiple times. First you connect to a broker server, which tells
+you (and your peer) your external endpoint. Then, when you perform the actual
+connection, you bind to the same _internal_ endpoint, and hope that the
+external endpoint will be reused.
+
+  internal                external                         destination
+  endpoint                endpoint                          endpoint
+host * --------------- * NAT * ------------- ( internet ) ---- * peer
+
+The internal port matters because TCP can only have one connection between a
+pair of endpoints. By allocating one external endpoint for each internal one,
+NAT can guarantee that there are no collisions. If there are two connections to
+the same destination, they (by definition) have different internal endpoints,
+and so the external endpoints must be distinct as well. Conversely, if two
+connections come from the same internal endpoint, the destination must be
+different. For two different destinations, the same external endpoint can be
+reused (even if the internal endpoints are different as well).
+
+All this is to say that if you reuse the internal port, it's reasonable for the
+NAT to try to give you the same external port. This is the behavior that is
+often seen in practice.
+
+With these three properties in mind, the implementation is pretty simple.
+First we need a broker server which would allow the clients to discover their
+public endpoints and exchange that information with other peers. In this
+example, server.py literally just gives the clients the list of the last few
+ip:port endpoints that connected to it. A more sophisticated server could
+coordinate connections between peers, but this is enough for a demonstration.
+
+All the client needs to do is:
+1) bind() to port 0 and retrieve the allocated port number with getsockname()
+2) bind() to the allocated port, connect() to the broker and learn the peer's
+endpoint. The client that connects first will need to connect a second time,
+because the peer wouldn't be in the list at that point in time.
+3) bind() to the allocated port and connect() to the peer. If the property
+number two holds, the timing isn't particularly strict. Otherwise you might
+have to try to connect repeatedly until it works.
+
+At each step, generously apply SO_REUSEADDR to avoid getting EADDRINUSE from
+bind().
+
+With the --retries parameter you can choose the amount of connection attempts
+to be made. On localhost, I had to set this parameter to 10000 just to have
+enough time to click connect on both sides. When doing this with an actual NAT,
+retries aren't really needed, the connect call will block until it timeouts or
+makes a connection.
