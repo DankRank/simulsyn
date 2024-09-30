@@ -69,8 +69,8 @@ something like this:
 
 Such setup has three properties that allow simultaneous opens to go smoothly.
 
-1) Incoming SYNs which come as a reply must not be allowed to pass through. If
-the firewall simply drops all incoming SYN packets to prevent new inbound
+1) Incoming SYNs which come as a reply must be allowed to pass through. If the
+firewall simply drops all incoming SYN packets to prevent new inbound
 connections, simultaneous open will obviously not work.
 
 2) Incoming SYNs which initiate a connection should be dropped without any
